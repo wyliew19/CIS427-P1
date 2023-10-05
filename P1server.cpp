@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <sqlite3.h>
+#include <unistd.h>
 #include <string>
 
 #define PORT 2982
@@ -53,7 +54,27 @@ int main() {
             exit(1);
         }
 
-        
+        // Receive the client's request
+        valread = recv(new_s, buf, sizeof(buf), 0);
+        if (valread <= 0) {
+            fprintf(stderr, "Client disconnected or an error occurred.\n");
+            close(new_s);
+            continue;
+        }
+
+        buf[valread] = '\0';
+
+        // Check if the request is a "BUY" request
+        if (strncmp(buf, "BUY ", 4) == 0) {
+            // Handle the "BUY" request
+            buy_request(new_s, db, buf);
+        } else {
+            // Handle other types of requests or provide an error response
+            sprintf(buf, "400 invalid command\nUnrecognized command: %s", buf);
+            send(new_s, buf, strlen(buf), 0);
+        }
+
+        close(new_s);
     }
 }
 
