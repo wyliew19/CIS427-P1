@@ -66,7 +66,7 @@ int main(int argc, char* argv[]) {
 
         // Check to be sure valid command was sent
         if (COMMANDS.find(cpy) == std::string::npos) {
-            fprintf(stderr, "400 invalid command\nCommand \"%s\" not recognized\n", buf);
+            fprintf(stderr, "400 invalid command\nCommand \"%s\" not recognized\n", cpy);
             continue;
         }
 
