@@ -13,6 +13,7 @@
 #define INV_COM(n) "400 invalid command\n" + n
 #define FORM_ERR(n) "403 message format error\n" + n
 
+// Author: Esam Alwaseem
 int callback_get_balance(void* user_balance, int argc, char** argv, char** azColName) {
     if (argc == 1) {
         // Assuming that the result set has only one column (usd_balance)
@@ -21,6 +22,7 @@ int callback_get_balance(void* user_balance, int argc, char** argv, char** azCol
     return 0; // Continue processing other rows if any
 }
 
+// Author: Esam Alwaseem
 void buy_request(int client_socket, sqlite3* db, const char* request) {
     char pokemon_name[50];
     char card_type[50];
@@ -84,6 +86,7 @@ void buy_request(int client_socket, sqlite3* db, const char* request) {
     send(client_socket, response, strlen(response), 0);
 }
 
+// Author: Hadeel Akhdar
 void sell_request(int client_socket, sqlite3* db, const char* request) {
     char pokemon_name[50];
     int count;
@@ -122,6 +125,7 @@ void sell_request(int client_socket, sqlite3* db, const char* request) {
     send(client_socket, response, strlen(response), 0);
 }
 
+// Author: Will Wylie
 void add_user(int client_socket, sqlite3* db, const char* request) {
     char email[255];
     char first_name[255];
@@ -157,9 +161,93 @@ void add_user(int client_socket, sqlite3* db, const char* request) {
 
     // Send a success response
     sprintf(response, "200 OK\nUser added: %s\n", user_name);
+    printf("Sending client: %s\n", response);
     send(client_socket, response, strlen(response), 0);
 }
 
+// Author: Will Wylie
+// Callback function to process the SELECT query result
+int callback_get_list(void* data, int argc, char** argv, char** azColName) {
+    char* result = (char*)data;
+
+    // Loop through the query result
+    for (int i = 0; i < argc; i++) {
+        // Append the column values to the result string
+        strcat(result, azColName[i]);
+        strcat(result, ": ");
+        strcat(result, argv[i]);
+        strcat(result, "\n");
+    }
+    strcat(result, "\n");
+
+    return 0; // Continue processing other rows if any
+}
+
+// Author: Mohammed Al-Mohammed
+void list_request(int client_socket, sqlite3* db) { 
+    char response[MAX_LINE];
+    char* zErrMsg = 0;
+
+    // Initialize the result string
+    char* result = (char*)malloc(MAX_LINE);
+    strcpy(result, "");
+
+    // Query the database to get a list of available Pokemon cards
+    const char* sql_query = "SELECT ID, card_name, card_type, rarity, count, owner_id FROM Pokemon_Cards;";
+
+    int rc = sqlite3_exec(db, sql_query, callback_get_list, result, &zErrMsg);
+
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", zErrMsg);
+        sqlite3_free(zErrMsg);
+        free(result); // Free the allocated memory
+        return;
+    }
+
+    // Respond with the list of Pokemon cards
+    if (strlen(result) > 0) {
+        sprintf(response, "200 OK\n%s", result);
+        send(client_socket, response, strlen(response), 0);
+    } else {
+        sprintf(response, "200 OK\nNo Pokemon cards available.\n");
+        send(client_socket, response, strlen(response), 0);
+    }
+
+    // Free the allocated memory
+    free(result);
+}
+
+// Author: Mohammed Al-Mohammed
+void balance_request(int client_socket, sqlite3* db, const char* request) {
+    int owner_id;
+    char response[MAX_LINE];
+    char sql_query[256];
+    char* zErrMsg = 0;
+
+    // Parse the BALANCE command request
+    if (sscanf(request, "BALANCE %d", &owner_id) != 1) {
+        sprintf(response, "403 message format error\nInvalid BALANCE request format\n");
+        send(client_socket, response, strlen(response), 0);
+        return;
+    }
+
+    // Query the database to get user balance
+    sprintf(sql_query, "SELECT usd_balance FROM Users WHERE ID=%d;", owner_id);
+    double user_balance = 0.0;
+    int rc = sqlite3_exec(db, sql_query, callback_get_balance, &user_balance, &zErrMsg);
+
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", zErrMsg);
+        sqlite3_free(zErrMsg);
+        return;
+    }
+
+    // Respond with the user's balance
+    sprintf(response, "200 OK\nBalance for user ID %d: $%.2lf\n", owner_id, user_balance);
+    send(client_socket, response, strlen(response), 0);
+}
+
+// Author: Will Wylie
 int main() {
     
     // Server needed variables
@@ -196,6 +284,7 @@ int main() {
     }
 
     listen(s, 1);
+    char* req = (char*)malloc(sizeof(buf));
     while(1) {
         if ((new_s = accept(s, (struct sockaddr*)&sin, &len)) < 0) {
             perror("Failed to accept client\n");
@@ -203,39 +292,41 @@ int main() {
         }
 
         // Receive the client's request
-        valread = recv(new_s, buf, sizeof(buf), 0);
-        if (valread <= 0) {
-            fprintf(stderr, "Client disconnected.\n");
-            close(new_s);
-            continue;
+        while(valread = recv(new_s, buf, sizeof(buf), 0)) {
+
+            
+            strcpy(req, buf);
+            printf("Received: \"%s\"\n", req);
+
+            // Check if the request is a "BUY" request
+            if (strncmp(req, "BUY", 3) == 0) {
+                // Handle the "BUY" request
+                buy_request(new_s, db, req);
+            } else if (strncmp(req, "SELL", 4) == 0) {
+                // Handle the "SELL" request
+                sell_request(new_s, db, req);
+            } else if (strncmp(req, "ADD_USER", 8) == 0) {
+                // Handle the "ADD_USER" request
+                add_user(new_s, db, req);
+            } else if (strncmp(req, "LIST", 4) == 0) {
+                // Handle the "LIST" request
+                list_request(new_s, db);
+            } else if (strncmp(req,"BALANCE", 7) == 0) {
+                // Handle the "BALANCE" request
+                balance_request(new_s, db, req);
+            } else if (strncmp(req, "SHUTDOWN", 8) == 0) {
+                // Handle the "SHUTDOWN" request
+                close(new_s);
+                goto SHUTDOWN;
+            } else {
+                // Handle other types of requests or provide an error response
+                sprintf(buf, "400 invalid command\nUnrecognized command: %s\n", req);
+                send(new_s, buf, strlen(buf), 0);
+            }
         }
-
-        char* req = (char*)malloc(sizeof(buf));
-        strcpy(req, buf);
-        printf("Received: \"%s\"\n", req);
-
-        // Check if the request is a "BUY" request
-        if (strncmp(req, "BUY", 3) == 0) {
-            // Handle the "BUY" request
-            buy_request(new_s, db, req);
-        } else if (strncmp(req, "SELL", 4) == 0) {
-            // Handle the "SELL" request
-            sell_request(new_s, db, req);
-        } else if (strncmp(req, "ADD_USER", 8) == 0) {
-            // Handle the "ADD_USER" request
-            add_user(new_s, db, req);
-        } else if (strncmp(req, "SHUTDOWN", 8) == 0) {
-            // Handle the "SHUTDOWN" request
-            close(new_s);
-            break;
-        } else {
-            // Handle other types of requests or provide an error response
-            sprintf(buf, "400 invalid command\nUnrecognized command: %s\n", req);
-            send(new_s, buf, strlen(buf), 0);
-        }
-
-        close(new_s);
     }
+SHUTDOWN:
+    free(req);
     shutdown(s, SHUT_RDWR);
     sqlite3_close(db);
     return 0;

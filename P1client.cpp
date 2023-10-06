@@ -58,7 +58,7 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
 
-    printf("Connected to server: type \"HELP\" for commands and format\n\n");
+    printf("Connected to server:\n\n");
 
     while (fgets(buf, sizeof(buf), stdin)) {
         buf[strlen(buf) - 1] = '\0';
@@ -96,7 +96,8 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "Server unexpectedly closed");
             exit(1);
         }
-        printf(buf);
+        
+        printf("%s\n", buf);
 
         
     }
