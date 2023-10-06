@@ -4,13 +4,18 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <cstring>
 #include <string>
+#include <stdlib.h>
 
 #define PORT 2982
 #define MAX_LINE 256
-const std::string COMMANDS = "BUY SELL LIST BALANCE SHUTDOWN QUIT";
+#define SUCCESS_PRINT printf("200 OK\n\n")
+
 
 int main(int argc, char* argv[]) {
+    const std::string COMMANDS = "BUY SELL LIST BALANCE SHUTDOWN QUIT ADD_USER";
+
     // Server connection variables
     struct hostent *hp;      // Host entry data structure
     int status, valread;    // Status and data read values
@@ -56,9 +61,8 @@ int main(int argc, char* argv[]) {
     printf("Connected to server: type \"HELP\" for commands and format\n\n");
 
     while (fgets(buf, sizeof(buf), stdin)) {
-        buf[MAX_LINE - 1] = '\0';
+        buf[strlen(buf) - 1] = '\0';
         len = strlen(buf) + 1;
-
         char* tmp = (char*)malloc(sizeof(buf)); // temporary variable for use of strtok
         strcpy(tmp, buf);
         char* cpy = strtok(tmp, " ");
@@ -73,13 +77,19 @@ int main(int argc, char* argv[]) {
         // If the client wants to quit
         if (strcmp(cpy, "QUIT") == 0) {
             close(s);
-            printf("200 OK");
+            SUCCESS_PRINT;
             return 0;
         }
 
         // Send the command to the server
         send(s, buf, len, 0);
 
+        // If the client wants to shut down the server
+        if (strcmp(cpy, "SHUTDOWN") == 0) {
+            close(s);
+            SUCCESS_PRINT;
+            return 0;
+        }
         // Receive server feedback
         valread = recv(s, buf, sizeof(buf), 0);
         if (valread <= 0) {
@@ -88,10 +98,6 @@ int main(int argc, char* argv[]) {
         }
         printf(buf);
 
-        // If the client wants to shut down the server
-        if (strcmp(cpy, "SHUTDOWN") == 0) {
-            close(s);
-            return 0;
-        }
+        
     }
 }
