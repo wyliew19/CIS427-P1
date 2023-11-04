@@ -7,11 +7,12 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <fcntl.h>
 
 #define PORT 2982
 #define MAX_LINE 256
-#define INV_COM(n) "400 invalid command\n" + n
-#define FORM_ERR(n) "403 message format error\n" + n
+#define MAX_CLIENTS 4
 
 // Author: Esam Alwaseem
 int callback_get_balance(void* user_balance, int argc, char** argv, char** azColName) {
@@ -247,34 +248,54 @@ void balance_request(int client_socket, sqlite3* db, const char* request) {
     send(client_socket, response, strlen(response), 0);
 }
 
+struct user {
+    int fd;
+    char* username;
+
+    user& operator=(int new_fd) {
+        this->fd = new_fd;
+        memset(this->username, 0, sizeof(this->username));
+        return *this;
+    }
+};
+
 // Author: Will Wylie
 int main() {
-    
-    // Server needed variables
     struct sockaddr_in sin;
-    char buf[MAX_LINE];
-    int s, new_s, valread;
+    int s, opts = 1;
     socklen_t len = sizeof(sin);
     memset(&sin, 0, sizeof(sin));
     sin.sin_family = AF_INET;
     sin.sin_addr.s_addr = INADDR_ANY;
     sin.sin_port = htons(PORT);
 
-    // SQLite needed variables
-    sqlite3 *db;
+    sqlite3* db;
     char* zErrMsg = 0;
-    char *sql;
-    
-    // Opening database
+    char* sql;
     int rc = sqlite3_open("PokemonDB.db", &db);
+
     if (rc) {
-        fprintf(stderr, "Failed to open: %s\n", sqlite3_errmsg(db));
+        fprintf(stderr, "Failed to open database: %s\n", sqlite3_errmsg(db));
         exit(1);
     }
 
-    // Creating socket file descriptor
     if ((s = socket(PF_INET, SOCK_STREAM, 0)) < 0) {
         perror("Failed to create a socket\n");
+        exit(1);
+    }
+
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opts, sizeof(opts));
+
+    // Setting options non blocking
+    if((opts = fcntl(s, F_GETFL)) < 0) { // Get current options
+        perror("Error in getting current options\n");
+    }
+    opts = (opts | O_NONBLOCK); // Don't clobber your old settings
+    if(fcntl(s, F_SETFL, opts) < 0) 
+        perror("Error\n");
+
+    if (bind(s, (struct sockaddr*)&sin, sizeof(sin)) < 0) {
+        perror("Failed to bind socket\n");
         exit(1);
     }
 
@@ -283,51 +304,96 @@ int main() {
         exit(1);
     }
 
-    listen(s, 1);
-    char* req = (char*)malloc(sizeof(buf));
-    while(1) {
-        if ((new_s = accept(s, (struct sockaddr*)&sin, &len)) < 0) {
-            perror("Failed to accept client\n");
+    listen(s, MAX_CLIENTS);
+
+    user client_sockets[MAX_CLIENTS];
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        client_sockets[i] = -1;
+    }
+
+    while (1) {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(s, &read_fds);
+
+        int max_fd = s;
+
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            int client_socket = client_sockets[i].fd;
+            if (client_socket != -1) {
+                FD_SET(client_socket, &read_fds);
+                if (client_socket > max_fd) {
+                    max_fd = client_socket;
+                }
+            }
+        }
+
+        if (select(max_fd + 1, &read_fds, NULL, NULL, NULL) < 0) {
+            perror("select failed\n");
             exit(1);
         }
 
-        // Receive the client's request
-        while(valread = recv(new_s, buf, sizeof(buf), 0)) {
+        if (FD_ISSET(s, &read_fds)) {
+            // New client connection
+            int new_s;
+            if ((new_s = accept(s, (struct sockaddr*)&sin, &len)) < 0) {
+                perror("Failed to accept client\n");
+                exit(1);
+            }
 
-            
-            strcpy(req, buf);
-            printf("Received: \"%s\"\n", req);
+            for (int i = 0; i < MAX_CLIENTS; i++) {
+                if (client_sockets[i].fd == -1) {
+                    client_sockets[i] = new_s;
+                    // TO IMPLEMENT: LOGIN FUNCTION
+                    // Input: client socket, database db, pointer to user struct
+                    // Output: goes back and forth with client trying to login;
+                    //         returns 0 if there is no issue and 1 if login attempt limit reached
+                    // Functionality: talk with client to log in using USER table in database, and
+                    //                on successful login update the user struct 'username' field
+                    break;
+                }
+            }
+        }
 
-            // Check if the request is a "BUY" request
-            if (strncmp(req, "BUY", 3) == 0) {
-                // Handle the "BUY" request
-                buy_request(new_s, db, req);
-            } else if (strncmp(req, "SELL", 4) == 0) {
-                // Handle the "SELL" request
-                sell_request(new_s, db, req);
-            } else if (strncmp(req, "ADD_USER", 8) == 0) {
-                // Handle the "ADD_USER" request
-                add_user(new_s, db, req);
-            } else if (strncmp(req, "LIST", 4) == 0) {
-                // Handle the "LIST" request
-                list_request(new_s, db);
-            } else if (strncmp(req,"BALANCE", 7) == 0) {
-                // Handle the "BALANCE" request
-                balance_request(new_s, db, req);
-            } else if (strncmp(req, "SHUTDOWN", 8) == 0) {
-                // Handle the "SHUTDOWN" request
-                close(new_s);
-                goto SHUTDOWN;
-            } else {
-                // Handle other types of requests or provide an error response
-                sprintf(buf, "400 invalid command\nUnrecognized command: %s\n", req);
-                send(new_s, buf, strlen(buf), 0);
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            int client_socket = client_sockets[i].fd;
+            if (client_socket != -1 && FD_ISSET(client_socket, &read_fds)) {
+                char buf[MAX_LINE];
+                char req[MAX_LINE];
+                int valread = recv(client_socket, buf, sizeof(buf), 0);
+
+                if (valread <= 0) {
+                    // Client disconnected or an error occurred
+                    close(client_socket);
+                    client_sockets[i] = -1;
+                } else {
+                    strncpy(req, buf, valread);
+                    req[valread] = '\0';
+
+                    printf("Received from client %d: \"%s\"\n", i, req);
+
+                    if (strncmp(req, "BUY", 3) == 0) {
+                        buy_request(client_socket, db, req);
+                    } else if (strncmp(req, "SELL", 4) == 0) {
+                        sell_request(client_socket, db, req);
+                    } else if (strncmp(req, "ADD_USER", 8) == 0) {
+                        add_user(client_socket, db, req);
+                    } else if (strncmp(req, "LIST", 4) == 0) {
+                        list_request(client_socket, db);
+                    } else if (strncmp(req, "BALANCE", 7) == 0) {
+                        balance_request(client_socket, db, req);
+                    } else if (strncmp(req, "SHUTDOWN", 8) == 0) {
+                        close(client_socket);
+                        client_sockets[i] = -1;
+                    } else {
+                        sprintf(buf, "400 invalid command\nUnrecognized command: %s\n", req);
+                        send(client_socket, buf, strlen(buf), 0);
+                    }
+                }
             }
         }
     }
-SHUTDOWN:
-    free(req);
-    shutdown(s, SHUT_RDWR);
+
     sqlite3_close(db);
     return 0;
 }
