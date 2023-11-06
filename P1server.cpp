@@ -501,8 +501,8 @@ int main() {
                         } else if (strncmp(req, "LOGOUT", 6) == 0) {
                             logout_request(client_socket, client_sockets);
                         } else if (strncmp(req, "SHUTDOWN", 8) == 0) {
-                            close(client_socket);
-                            client_sockets[i] = -1;
+                            if (client_sockets[i].id == ROOT_USERID)
+                                goto SHUTDOWN;
                         } else {
                             sprintf(buf, "400 invalid command\nUnrecognized command: %s\n", req);
                             send(client_socket, buf, strlen(buf), 0);
@@ -512,7 +512,12 @@ int main() {
             }
         }
     }
-
+SHUTDOWN:
+    for (user u : client_sockets) {
+        if (u.fd != -1)
+            close(u.fd);
+    }
+    shutdown(s, SHUT_RDWR);
     sqlite3_close(db);
     return 0;
 }

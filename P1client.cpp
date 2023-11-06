@@ -14,7 +14,7 @@
 
 
 int main(int argc, char* argv[]) {
-    const std::string COMMANDS = "BUY SELL LIST BALANCE SHUTDOWN QUIT ADD_USER";
+    const std::string COMMANDS = "BUY SELL LIST BALANCE SHUTDOWN QUIT ADD_USER DEPOSIT LOGIN LOGOUT";
 
     // Server connection variables
     struct hostent *hp;      // Host entry data structure
