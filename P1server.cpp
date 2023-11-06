@@ -13,6 +13,20 @@
 #define PORT 2982
 #define MAX_LINE 256
 #define MAX_CLIENTS 4
+#define ROOT_USERID 0
+
+struct user {
+    int fd;
+    char* username;
+    int id;
+
+    user& operator=(int new_fd) {
+        this->fd = new_fd;
+        memset(this->username, 0, sizeof(this->username));
+        this->id = -1;
+        return *this;
+    }
+};
 
 // Author: Esam Alwaseem
 int callback_get_balance(void* user_balance, int argc, char** argv, char** azColName) {
@@ -84,6 +98,48 @@ void buy_request(int client_socket, sqlite3* db, const char* request) {
 
     // Success response
     sprintf(response, "200 OK\nBOUGHT: New balance: %d %s. User USD balance $%.2lf\n", count, pokemon_name, user_balance);
+    send(client_socket, response, strlen(response), 0);
+}
+
+// Author: Esam Alwaseem
+void deposit_request(int client_socket, sqlite3* db, const char* request) {
+    int user_id;
+    double deposit_amount;
+    char response[MAX_LINE];
+    char sql_query[256];
+    char* zErrMsg = 0;
+
+    // Parse the DEPOSIT command request
+    if (sscanf(request, "DEPOSIT %d %lf", &user_id, &deposit_amount) != 2) {
+        sprintf(response, "403 message format error\nInvalid DEPOSIT request format\n");
+        send(client_socket, response, strlen(response), 0);
+        return;
+    }
+
+    // Check for a valid deposit amount
+    if (deposit_amount <= 0) {
+        sprintf(response, "403 Invalid deposit amount\n");
+        send(client_socket, response, strlen(response), 0);
+        return;
+    }
+
+    // Update the user's balance in the database
+    sprintf(sql_query, "UPDATE Users SET usd_balance = usd_balance + %.2lf WHERE ID = %d; "
+                       "SELECT usd_balance FROM Users WHERE ID = %d;", 
+                       deposit_amount, user_id, user_id);
+    
+    double new_balance = 0.0;
+    int rc = sqlite3_exec(db, sql_query, callback_get_balance, &new_balance, &zErrMsg);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error: %s\n", zErrMsg);
+        sqlite3_free(zErrMsg);
+        sprintf(response, "Failed to update user balance.\n");
+        send(client_socket, response, strlen(response), 0);
+        return; // Error message
+    }
+
+    // Send a success response with the new balance
+    sprintf(response, "200 OK\nDeposit successful. New User balance: $%.2lf\n", new_balance);
     send(client_socket, response, strlen(response), 0);
 }
 
@@ -166,56 +222,53 @@ void add_user(int client_socket, sqlite3* db, const char* request) {
     send(client_socket, response, strlen(response), 0);
 }
 
-// Author: Will Wylie
-// Callback function to process the SELECT query result
-int callback_get_list(void* data, int argc, char** argv, char** azColName) {
-    char* result = (char*)data;
+int callback_format_list(void* notUsed, int argc, char** argv, char** azColName) {
+    char* data = (char*)notUsed;
+    int offset = strlen(data);
 
-    // Loop through the query result
+    // Add a formatted string for each record to the result
     for (int i = 0; i < argc; i++) {
-        // Append the column values to the result string
-        strcat(result, azColName[i]);
-        strcat(result, ": ");
-        strcat(result, argv[i]);
-        strcat(result, "\n");
+        offset += sprintf(data + offset, "%s ", argv[i] ? argv[i] : "NULL");
     }
-    strcat(result, "\n");
-
+    sprintf(data + offset, "\n");
     return 0; // Continue processing other rows if any
 }
 
-// Author: Mohammed Al-Mohammed
-void list_request(int client_socket, sqlite3* db) { 
-    char response[MAX_LINE];
+// Modified the list_request to include owner_id parameter and a check for the root user
+void list_request(int client_socket, sqlite3* db, int owner_id, int is_root) { 
+    char response[MAX_LINE * 10]; // Increase buffer size as needed to accommodate the list
     char* zErrMsg = 0;
 
-    // Initialize the result string
-    char* result = (char*)malloc(MAX_LINE);
-    strcpy(result, "");
+    // Determine the SQL query based on the user's privileges
+    char sql_query[MAX_LINE];
+    if (is_root) {
+        sprintf(sql_query, "SELECT ID, card_name, card_type, rarity, count, owner_id FROM Pokemon_Cards;");
+    } else {
+        sprintf(sql_query, "SELECT ID, card_name, card_type, rarity, count, owner_id FROM Pokemon_Cards WHERE owner_id=%d;", owner_id);
+    }
 
-    // Query the database to get a list of available Pokemon cards
-    const char* sql_query = "SELECT ID, card_name, card_type, rarity, count, owner_id FROM Pokemon_Cards;";
-
-    int rc = sqlite3_exec(db, sql_query, callback_get_list, result, &zErrMsg);
+    int rc = sqlite3_exec(db, sql_query, callback_format_list, response, &zErrMsg);
 
     if (rc != SQLITE_OK) {
         fprintf(stderr, "SQL error: %s\n", zErrMsg);
         sqlite3_free(zErrMsg);
-        free(result); // Free the allocated memory
+        sprintf(response, "500 Internal Server Error\nCould not retrieve the list.\n");
+        send(client_socket, response, strlen(response), 0);
         return;
     }
 
-    // Respond with the list of Pokemon cards
-    if (strlen(result) > 0) {
-        sprintf(response, "200 OK\n%s", result);
-        send(client_socket, response, strlen(response), 0);
+    // If the result string is empty, no records are available
+    if (strlen(response) == 0) {
+        sprintf(response, "200 OK\nNo Pokemon cards available for the user.\n");
     } else {
-        sprintf(response, "200 OK\nNo Pokemon cards available.\n");
-        send(client_socket, response, strlen(response), 0);
+        // Prepend the response status to the actual data
+        char full_response[MAX_LINE * 10];
+        sprintf(full_response, "200 OK\nThe list of records in the Pokemon cards table for %s user:\n%s",
+                is_root ? "ALL" : "current", response);
+        strcpy(response, full_response);
     }
 
-    // Free the allocated memory
-    free(result);
+    send(client_socket, response, strlen(response), 0);
 }
 
 // Author: Mohammed Al-Mohammed
@@ -248,16 +301,83 @@ void balance_request(int client_socket, sqlite3* db, const char* request) {
     send(client_socket, response, strlen(response), 0);
 }
 
-struct user {
-    int fd;
-    char* username;
-
-    user& operator=(int new_fd) {
-        this->fd = new_fd;
-        memset(this->username, 0, sizeof(this->username));
-        return *this;
+// LOGOUT Function
+void logout_request(int client_socket, user* client_sockets) {
+    int client_index = -1;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (client_sockets[i].fd == client_socket) {
+            client_index = i;
+            break;
+        }
     }
-};
+
+    if (client_index == -1) {
+        // Client not found, handle the error
+        char response[] = "400 Client not found\n";
+        send(client_socket, response, sizeof(response) - 1, 0);
+        close(client_socket);
+        return;
+    }
+
+    // Clear the user's username and close the socket
+    memset(client_sockets[client_index].username, 0, sizeof(client_sockets[client_index].username));
+    close(client_socket);
+
+    // Return a success response
+    char response[] = "200 OK\n";
+    send(client_socket, response, strlen(response) - 1, 0);
+}
+
+// LOGIN function
+void login(int client_socket, sqlite3* db, user& client) {
+    char buf[MAX_LINE];
+    char req[MAX_LINE];
+    int valread = recv(client_socket, buf, strlen(buf), 0);
+    if (valread <= 0) {
+        close(client_socket);
+        return;
+    }
+    strncpy(req, buf, valread);
+    req[valread] = '\0';
+
+    char command[64];
+    char username[64];
+    char password[64];
+
+    if (sscanf(req, "%63s %63s %63s", command, username, password) != 3 || strcmp(command, "LOGIN") != 0) {
+        char* response = "400 Bad Request\nInvalid LOGIN command format\n";
+        send(client_socket, response, strlen(response), 0);
+        close(client_socket);
+        return;
+    }
+
+    // Check if the user credentials are correct in your SQLite database
+    char query[256];
+    snprintf(query, sizeof(query), "SELECT username FROM users WHERE username='%s' AND password='%s';", username, password);
+
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, query, -1, &stmt, nullptr) != SQLITE_OK) {
+        char* zErrMsg = (char*)sqlite3_errmsg(db);
+        fprintf(stderr,"SQLite error: ", zErrMsg, "\n");
+        close(client_socket);
+        return;
+    }
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        // Successful login
+        strncpy(client.username, username, sizeof(client.username));
+        char* response = "200 OK\n";
+        send(client_socket, response, strlen(response), 0);
+    } else {
+        // Wrong UserID or Password
+        char* response = "403 Wrong UserID or Password\n";
+        send(client_socket, response, strlen(response), 0);
+        close(client_socket);
+    }
+
+    sqlite3_finalize(stmt);
+}
+
 
 // Author: Will Wylie
 int main() {
@@ -286,7 +406,7 @@ int main() {
 
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opts, sizeof(opts));
 
-    // Setting options non blocking
+    // Setting options non-blocking
     if((opts = fcntl(s, F_GETFL)) < 0) { // Get current options
         perror("Error in getting current options\n");
     }
@@ -344,12 +464,6 @@ int main() {
             for (int i = 0; i < MAX_CLIENTS; i++) {
                 if (client_sockets[i].fd == -1) {
                     client_sockets[i] = new_s;
-                    // TO IMPLEMENT: LOGIN FUNCTION
-                    // Input: client socket, database db, pointer to user struct
-                    // Output: goes back and forth with client trying to login;
-                    //         returns 0 if there is no issue and 1 if login attempt limit reached
-                    // Functionality: talk with client to log in using USER table in database, and
-                    //                on successful login update the user struct 'username' field
                     break;
                 }
             }
@@ -358,36 +472,41 @@ int main() {
         for (int i = 0; i < MAX_CLIENTS; i++) {
             int client_socket = client_sockets[i].fd;
             if (client_socket != -1 && FD_ISSET(client_socket, &read_fds)) {
-                char buf[MAX_LINE];
-                char req[MAX_LINE];
-                int valread = recv(client_socket, buf, sizeof(buf), 0);
-
-                if (valread <= 0) {
-                    // Client disconnected or an error occurred
-                    close(client_socket);
-                    client_sockets[i] = -1;
+                if (client_sockets[i].username[0] == '\0') {
+                    login(client_socket, db, client_sockets[i]);
                 } else {
-                    strncpy(req, buf, valread);
-                    req[valread] = '\0';
+                    char buf[MAX_LINE];
+                    char req[MAX_LINE];
+                    int valread = recv(client_socket, buf, sizeof(buf), 0);
 
-                    printf("Received from client %d: \"%s\"\n", i, req);
-
-                    if (strncmp(req, "BUY", 3) == 0) {
-                        buy_request(client_socket, db, req);
-                    } else if (strncmp(req, "SELL", 4) == 0) {
-                        sell_request(client_socket, db, req);
-                    } else if (strncmp(req, "ADD_USER", 8) == 0) {
-                        add_user(client_socket, db, req);
-                    } else if (strncmp(req, "LIST", 4) == 0) {
-                        list_request(client_socket, db);
-                    } else if (strncmp(req, "BALANCE", 7) == 0) {
-                        balance_request(client_socket, db, req);
-                    } else if (strncmp(req, "SHUTDOWN", 8) == 0) {
-                        close(client_socket);
-                        client_sockets[i] = -1;
+                    if (valread <= 0) {
+                        // Client disconnected or an error occurred
+                        logout_request(client_socket, client_sockets); // Added LOGOUT handling
                     } else {
-                        sprintf(buf, "400 invalid command\nUnrecognized command: %s\n", req);
-                        send(client_socket, buf, strlen(buf), 0);
+                        strncpy(req, buf, valread);
+                        req[valread] = '\0';
+
+                        printf("Received from client %d: \"%s\"\n", i, req);
+
+                        if (strncmp(req, "BUY", 3) == 0) {
+                            buy_request(client_socket, db, req);
+                        } else if (strncmp(req, "SELL", 4) == 0) {
+                            sell_request(client_socket, db, req);
+                        } else if (strncmp(req, "ADD_USER", 8) == 0) {
+                            add_user(client_socket, db, req);
+                        } else if (strncmp(req, "LIST", 4) == 0) {
+                            list_request(client_socket, db, client_sockets[i].id, client_sockets[i].id == ROOT_USERID);
+                        } else if (strncmp(req, "BALANCE", 7) == 0) {
+                            balance_request(client_socket, db, req);
+                        } else if (strncmp(req, "LOGOUT", 6) == 0) {
+                            logout_request(client_socket, client_sockets);
+                        } else if (strncmp(req, "SHUTDOWN", 8) == 0) {
+                            close(client_socket);
+                            client_sockets[i] = -1;
+                        } else {
+                            sprintf(buf, "400 invalid command\nUnrecognized command: %s\n", req);
+                            send(client_socket, buf, strlen(buf), 0);
+                        }
                     }
                 }
             }
